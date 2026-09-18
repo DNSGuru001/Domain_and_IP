@@ -1,0 +1,15 @@
+{
+  "created": "2026-09-18",
+  "note": "",
+  "origin": "gui",
+  "schema": 1,
+  "slug": "reddit",
+  "sources": [
+    "crtsh",
+    "curated",
+    "dns:cname",
+    "page",
+    "seed"
+  ],
+  "updated": "2026-09-18"
+}
