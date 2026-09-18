@@ -1,0 +1,6 @@
+# Списки routelist: всегда LF, чтобы podkop и tools/build.py читали файлы одинаково на любой ОС.
+*.lst text eol=lf
+*.json text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
