@@ -1,0 +1,17 @@
+{
+  "created": "2026-11-06",
+  "note": "",
+  "origin": "gui",
+  "schema": 1,
+  "slug": "gosuslugi",
+  "sources": [
+    "dns:cname",
+    "hackertarget",
+    "page",
+    "rapiddns",
+    "seed",
+    "subdomaincenter",
+    "urlscan"
+  ],
+  "updated": "2026-11-06"
+}
