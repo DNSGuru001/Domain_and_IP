@@ -2,6 +2,7 @@
   "created": "2026-11-06",
   "note": "",
   "origin": "gui",
+  "route": "direct",
   "schema": 1,
   "slug": "gosuslugi",
   "sources": [
@@ -13,5 +14,5 @@
     "subdomaincenter",
     "urlscan"
   ],
-  "updated": "2026-11-06"
+  "updated": "2026-11-09"
 }
