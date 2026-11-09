@@ -14,6 +14,8 @@
     строки, завершающий LF; пустой список = файл 0 байт (только для агрегатов);
   * domains/all.lst = domains/* ∪ hosts/* минус хосты, покрытые суффиксом;
     subnets/ipv4/all.lst = объединение (collapse); subnets/ipv6/all.lst — только если есть IPv6;
+  * сервисы с "route": "direct" в meta входят не в эти агрегаты, а в direct/domains.lst,
+    direct/subnets-ipv4.lst и direct/subnets-ipv6.lst (правила те же);
   * meta/<slug>.json — валидный JSON-объект с полем "slug", равным имени файла.
 
 Коды выхода: 0 — всё в порядке, 1 — найдены проблемы (отчёт в stdout), 2 — ошибка запуска.
@@ -26,6 +28,7 @@ import ipaddress
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
@@ -46,8 +49,21 @@ KIND_BY_DIR = {
 AGG_DOMAINS = "domains/all.lst"
 AGG_IPV4 = "subnets/ipv4/all.lst"
 AGG_IPV6 = "subnets/ipv6/all.lst"
-AGGREGATES = {AGG_DOMAINS: KIND_DOMAIN, AGG_IPV4: KIND_CIDR4, AGG_IPV6: KIND_CIDR6}
+DIRECT_DIR = "direct"
+AGG_DIRECT_DOMAINS = "direct/domains.lst"
+AGG_DIRECT_IPV4 = "direct/subnets-ipv4.lst"
+AGG_DIRECT_IPV6 = "direct/subnets-ipv6.lst"
+AGGREGATES = {
+    AGG_DOMAINS: KIND_DOMAIN,
+    AGG_IPV4: KIND_CIDR4,
+    AGG_IPV6: KIND_CIDR6,
+    AGG_DIRECT_DOMAINS: KIND_DOMAIN,
+    AGG_DIRECT_IPV4: KIND_CIDR4,
+    AGG_DIRECT_IPV6: KIND_CIDR6,
+}
 META_DIR = "meta"
+ROUTE_VPN = "vpn"
+ROUTE_DIRECT = "direct"
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -93,6 +109,18 @@ def collapse(nets: list[Network]) -> list[Network]:
 # ---- проверка отдельных значений -----------------------------------------------------------------
 
 
+def is_valid_a_label(label: str) -> bool:
+    """Метка xn-- декодируется в допустимое имя. В routelist.core это делает пакет idna (IDNA 2008);
+    здесь только stdlib, поэтому проверка приближённая: буквы, цифры и знаки в канонической форме."""
+    try:
+        decoded = label[4:].encode("ascii").decode("punycode")
+    except UnicodeError:
+        return False
+    if decoded.isascii() or decoded != unicodedata.normalize("NFC", decoded.lower()):
+        return False
+    return all(ch == "-" or unicodedata.category(ch)[0] in "LMN" for ch in decoded)
+
+
 def check_value(value: str, kind: str) -> str | None:
     """None, если строка каноническая для своего вида; иначе причина по-русски."""
     if kind in (KIND_DOMAIN, KIND_HOST):
@@ -102,6 +130,8 @@ def check_value(value: str, kind: str) -> str | None:
             return "имя без точки не принимается"
         if len(value) > MAX_HOST_LEN:
             return "слишком длинное имя"
+        if any(label.startswith("xn--") and not is_valid_a_label(label) for label in value.split(".")):
+            return "некорректная punycode-метка"
         return None
     try:
         net = ipaddress.ip_network(value, strict=True)
@@ -177,9 +207,26 @@ class Repo:
         # kind -> slug -> values
         self.services: dict[str, dict[str, list[str]]] = {k: {} for k in KIND_BY_DIR.values()}
         self.aggregates: dict[str, bytes | None] = {}
+        self.direct: set[str] = set()  # сервисы с прямым маршрутом
 
     def rel(self, p: Path) -> str:
         return p.relative_to(self.root).as_posix()
+
+    def read_routes(self) -> None:
+        """Какие сервисы идут напрямую: поле route в meta/<slug>.json (нет поля — через VPN)."""
+        meta_dir = self.root / META_DIR
+        if not meta_dir.is_dir():
+            return
+        for p in sorted(meta_dir.glob("*.json")):
+            try:
+                obj = json.loads(p.read_bytes().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            route = (obj.get("route") if isinstance(obj, dict) else None) or ROUTE_VPN
+            if route == ROUTE_DIRECT:
+                self.direct.add(p.stem)
+            elif route != ROUTE_VPN:
+                self.problems.append(f'{self.rel(p)}: недопустимый маршрут {route!r} (ожидается "direct")')
 
     def scan(self) -> None:
         for directory, kind in KIND_BY_DIR.items():
@@ -213,8 +260,17 @@ class Repo:
             for p in sorted(subnets.iterdir()):
                 if p.name not in ("ipv4", "ipv6"):
                     self.problems.append(f"{self.rel(p)}: посторонний элемент в subnets/")
+        direct_dir = self.root / DIRECT_DIR
+        if direct_dir.is_dir():
+            for p in sorted(direct_dir.iterdir()):
+                rel = self.rel(p)
+                if rel in AGGREGATES:
+                    self.aggregates[rel] = p.read_bytes()
+                else:
+                    self.problems.append(f"{rel}: посторонний элемент в {DIRECT_DIR}/")
         for agg in AGGREGATES:
             self.aggregates.setdefault(agg, None)
+        self.read_routes()
         meta_dir = self.root / META_DIR
         if meta_dir.is_dir():
             for p in sorted(meta_dir.iterdir()):
@@ -236,18 +292,32 @@ class Repo:
 
     # ---- агрегаты -------------------------------------------------------------------------------
     def expected_aggregates(self) -> dict[str, bytes]:
-        suffixes = sorted({v for vals in self.services[KIND_DOMAIN].values() for v in vals})
-        hosts = {v for vals in self.services[KIND_HOST].values() for v in vals}
+        return {
+            **self._aggregates(False, AGG_DOMAINS, AGG_IPV4, AGG_IPV6),
+            **self._aggregates(True, AGG_DIRECT_DOMAINS, AGG_DIRECT_IPV4, AGG_DIRECT_IPV6),
+        }
+
+    def _aggregates(self, direct: bool, domains: str, ipv4: str, ipv6: str) -> dict[str, bytes]:
+        def values(kind: str) -> list[str]:
+            return [
+                v
+                for slug, vals in self.services[kind].items()
+                if (slug in self.direct) == direct
+                for v in vals
+            ]
+
+        suffixes = sorted(set(values(KIND_DOMAIN)))
+        hosts = set(values(KIND_HOST))
         all_domains = set(suffixes) | {h for h in hosts if not is_covered_by_suffix(h, suffixes)}
-        v4 = [ipaddress.ip_network(v) for vals in self.services[KIND_CIDR4].values() for v in vals]
-        v6 = [ipaddress.ip_network(v) for vals in self.services[KIND_CIDR6].values() for v in vals]
+        v4 = [ipaddress.ip_network(v) for v in values(KIND_CIDR4)]
+        v6 = [ipaddress.ip_network(v) for v in values(KIND_CIDR6)]
         out = {
-            AGG_DOMAINS: render_lst(all_domains, KIND_DOMAIN),
-            AGG_IPV4: render_lst([render_network(n) for n in collapse(v4)], KIND_CIDR4),
+            domains: render_lst(all_domains, KIND_DOMAIN),
+            ipv4: render_lst([render_network(n) for n in collapse(v4)], KIND_CIDR4),
         }
         v6_rendered = [render_network(n) for n in collapse(v6)]
         if v6_rendered:
-            out[AGG_IPV6] = render_lst(v6_rendered, KIND_CIDR6)
+            out[ipv6] = render_lst(v6_rendered, KIND_CIDR6)
         return out
 
     def check_aggregates(self) -> None:
@@ -260,6 +330,8 @@ class Repo:
                     self.problems.append(f"{path}: агрегат должен отсутствовать (нет записей IPv6)")
                 continue
             if actual is None:
+                if not want and path.startswith(DIRECT_DIR + "/"):
+                    continue  # прямых сервисов нет, а файлы появятся с первым коммитом программы
                 self.problems.append(f"{path}: агрегат отсутствует (ожидается {_count(want)} строк)")
                 continue
             if actual != want:
@@ -296,15 +368,23 @@ def check(root: Path) -> list[str]:
 # ---- починка -------------------------------------------------------------------------------------
 
 
+def _idn_to_ascii(s: str) -> str:
+    """IDN → punycode по меткам, как idna.encode(uts46=True) в routelist.core.
+
+    Кодек "idna" из stdlib (IDNA 2003) не подходит: он превратил бы faß.de в другой домен, fass.de."""
+    s = unicodedata.normalize("NFKC", s).replace("\u3002", ".").lower()
+    return ".".join(
+        label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+        for label in s.split(".")
+    )
+
+
 def _lenient_domain(raw: str) -> str | None:
     s = raw.strip().lower().rstrip(".")
     while s.startswith(("*.", ".")):
         s = s[2:] if s.startswith("*.") else s[1:]
-    if any(ord(ch) > 127 for ch in s):
-        try:
-            s = s.encode("idna").decode("ascii")
-        except UnicodeError:
-            return None
+    if not s.isascii():
+        s = _idn_to_ascii(s)
     return s if check_value(s, KIND_DOMAIN) is None else None
 
 
@@ -337,9 +417,11 @@ def fix(root: Path) -> list[str]:
             values: set[str] = set()
             for lineno, raw in enumerate(p.read_bytes().decode("utf-8", errors="replace").split("\n"), 1):
                 line = raw.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith(("#", "//")):
                     continue
-                line = line.split("#", 1)[0].strip()
+                line = line.split("#", 1)[0].split("//", 1)[0].strip()
+                if not line:
+                    continue
                 fixed = (
                     _lenient_domain(line)
                     if kind in (KIND_DOMAIN, KIND_HOST)
@@ -358,16 +440,19 @@ def fix(root: Path) -> list[str]:
             else:
                 p.unlink()
                 report.append(f"{rel}: удалён (пусто)")
-    for path, data in repo.expected_aggregates().items():
+    repo.read_routes()
+    expected = repo.expected_aggregates()
+    for path, data in expected.items():
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_bytes() != data:
             target.write_bytes(data)
             report.append(f"{path}: агрегат обновлён ({_count(data)} строк)")
-    ipv6_agg = root / AGG_IPV6
-    if ipv6_agg.exists() and not repo.services[KIND_CIDR6]:
-        ipv6_agg.unlink()
-        report.append(f"{AGG_IPV6}: удалён (нет записей IPv6)")
+    for path in (AGG_IPV6, AGG_DIRECT_IPV6):
+        ipv6_agg = root / path
+        if path not in expected and ipv6_agg.exists():
+            ipv6_agg.unlink()
+            report.append(f"{path}: удалён (нет записей IPv6)")
     meta_dir = root / META_DIR
     if meta_dir.is_dir():
         for p in sorted(meta_dir.glob("*.json")):
