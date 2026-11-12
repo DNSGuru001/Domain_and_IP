@@ -1,0 +1,19 @@
+{
+  "created": "2026-11-12",
+  "note": "",
+  "origin": "gui",
+  "schema": 1,
+  "slug": "github",
+  "sources": [
+    "certspotter",
+    "crtsh",
+    "curated",
+    "dns:cname",
+    "hackertarget",
+    "page",
+    "rapiddns",
+    "seed",
+    "urlscan"
+  ],
+  "updated": "2026-11-12"
+}
