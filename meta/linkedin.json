@@ -1,0 +1,16 @@
+{
+  "created": "2026-11-12",
+  "note": "",
+  "origin": "bot",
+  "schema": 1,
+  "slug": "linkedin",
+  "sources": [
+    "crtsh",
+    "curated",
+    "dns:cname",
+    "page",
+    "redirect",
+    "seed"
+  ],
+  "updated": "2026-11-12"
+}
