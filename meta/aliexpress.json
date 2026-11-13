@@ -1,0 +1,19 @@
+{
+  "created": "2026-11-13",
+  "note": "",
+  "origin": "gui",
+  "route": "direct",
+  "schema": 1,
+  "slug": "aliexpress",
+  "sources": [
+    "curated",
+    "dns:cname",
+    "hackertarget",
+    "page",
+    "rapiddns",
+    "seed",
+    "subdomaincenter",
+    "urlscan"
+  ],
+  "updated": "2026-11-13"
+}
