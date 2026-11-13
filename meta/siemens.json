@@ -1,0 +1,17 @@
+{
+  "created": "2026-11-13",
+  "note": "",
+  "origin": "gui",
+  "schema": 1,
+  "slug": "siemens",
+  "sources": [
+    "crtsh",
+    "dns:cname",
+    "hackertarget",
+    "rapiddns",
+    "seed",
+    "subdomaincenter",
+    "urlscan"
+  ],
+  "updated": "2026-11-13"
+}
